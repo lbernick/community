@@ -1,15 +1,17 @@
 ---
-status: proposed
+status: implementable
 title: Embedded TaskRuns and Runs Status in PipelineRuns
 creation-date: '2022-01-24'
-last-updated: '2022-01-29'
+last-updated: '2022-02-03'
 authors:
 - '@lbernick'
 - '@jerop'
 see-also:
 - TEP-0021
 - TEP-0056
+- TEP-0084
 - TEP-0090
+- TEP-0096
 ---
 
 # TEP-0100: Embedded TaskRuns and Runs Status in PipelineRuns
@@ -26,7 +28,35 @@ see-also:
   - [PipelineRun Status](#pipelinerun-status)
   - [Owner References and Labels](#owner-references-and-labels)
   - [Tekton Results API](#tekton-results-api)
-- [Open Questions](#open-questions)
+- [Proposal](#proposal)
+  - [API Changes](#api-changes)
+    - [1. Add Minimal Embedded Status](#1-add-minimal-embedded-status)
+        - [Alternatives](#alternatives)
+    - [2. Deprecate and Remove Full Embedded Status](#2-deprecate-and-remove-full-embedded-status)
+  - [Example](#example)
+  - [Fetching complete statuses of TaskRuns and Runs](#fetching-complete-statuses-of-taskruns-and-runs)
+    - [Cluster](#cluster)
+    - [Results API](#results-api)
+    - [Go Libraries](#go-libraries)
+  - [Beta API](#beta-api)
+        - [Alternatives](#alternatives-1)
+  - [V1 API](#v1-api)
+  - [JSON keys](#json-keys)
+  - [Tekton Projects](#tekton-projects)
+    - [Tekton Pipelines](#tekton-pipelines)
+    - [Tekton Results](#tekton-results)
+    - [Tekton Dashboard](#tekton-dashboard)
+    - [Tekton Chains](#tekton-chains)
+- [Design Evaluation](#design-evaluation)
+- [Alternatives](#alternatives-2)
+  - [Add Minimal Embedded Status - Collapse Fields](#add-minimal-embedded-status---collapse-fields)
+    - [Discussion](#discussion)
+  - [Add Minimal Embedded Status - Use Map](#add-minimal-embedded-status---use-map)
+    - [Discussion](#discussion-1)
+  - [Beta API - Use Booleans](#beta-api---use-booleans)
+    - [Discussion](#discussion-2)
+  - [Beta API - Default to Full then Both then Minimal](#beta-api---default-to-full-then-both-then-minimal)
+    - [Discussion](#discussion-3)
 - [References](#references)
 <!-- /toc -->
 
@@ -171,12 +201,503 @@ In addition to grouping related resources, Tekton Results provides long term sto
 of `PipelineRuns`, `TaskRuns` and `Runs` away from the runtime storage in etcd.
 Read more in [TEP-0021][tep-0021].
 
-## Open Questions
+## Proposal
 
-* [Qn #1][qn-1]: What fields will no longer be available? What do we lose from the optimizations?
-  We will discuss this in the proposal.
-* [Qn #2][qn-1]: What does an example status look like?
-  We will provide examples in the proposal.
+The `PipelineRunStatus` should contain:
+* the names of its `TaskRuns` and `Runs`.
+* the overall status (`ConditionSucceeded`) of its `TaskRuns` and `Runs`.
+* the names of the `PipelineTasks` from which the `TaskRuns` and `Runs` were executed.
+
+Users and tools can find the complete status of `TaskRuns` and `Runs` in the cluster.
+Moreover, users and tools can rely on [Tekton Results](#tekton-results-api) and
+[Owner References and Labels](#owner-references-and-labels) to identify related objects.
+
+### API Changes
+
+#### 1. Add Minimal Embedded Status
+
+Introduce two new structs to store the minimal status of `TaskRuns` and `Runs` in the
+`PipelineRun` status, with the names and overall status only:
+
+```go
+type PipelineRunTaskRunMinimalStatus struct {
+	PipelineTaskName string `json:"pipelineTaskName,omitempty"`
+	TaskRunName string `json:"taskRunName,omitempty"`
+	duckv1beta1.Status `json:",inline"`
+}
+
+type PipelineRunRunMinimalStatus struct {
+	PipelineTaskName string `json:"pipelineTaskName,omitempty"`
+	RunName string `json:"runName,omitempty"`
+	duckv1beta1.Status `json:",inline"`
+}
+```
+
+Add the new fields to [`PipelineRunStatusFields`](#pipelinerun-status) as follows:
+
+```go
+type PipelineRunStatusFields struct {
+	...
+	TaskRuns map[string]*PipelineRunTaskRunStatus `json:"taskRuns,omitempty"`
+	TaskRunsStatuses []PipelineRunTaskRunMinimalStatus `json:"taskRunsStatuses,omitempty"`
+	Runs map[string]*PipelineRunRunStatus `json:"runs,omitempty"`
+	RunsStatuses []PipelineRunRunMinimalStatus `json:"runsStatuses,omitempty"`
+	...
+}
+```
+
+The existing fields providing the complete `TaskRun` and `Runs` are maps with the
+resource names as keys. However, the new fields are sub-objects instead of maps as
+recommended by the [Kubernetes API conventions][subobjects].
+
+While the names of `TaskRuns` and `Runs` are concatenations of the names of the
+`PipelineRuns` and `PipelineTasks`, they are sometimes truncated when they are
+too long. Therefore, we include the `PipelineTask` name because tools, such as
+the Tekton Dashboard, would still need the `PipelineTask` name in these situations.
+
+###### Alternatives
+* [Use Maps](#add-minimal-embedded-status---use-map)
+* [Collapse Fields](#add-minimal-embedded-status---collapse-fields)
+
+#### 2. Deprecate and Remove Full Embedded Status
+
+Deprecate and remove the old fields from `PipelineRunStatusFields` from the Beta API.
+
+```go
+type PipelineRunStatusFields struct {
+	...
+	TaskRunsStatuses []PipelineRunTaskRunMinimalStatus `json:"taskRunsStatuses,omitempty"`
+	RunsStatuses []PipelineRunRunMinimalStatus `json:"runsStatuses,omitempty"`
+	...
+}
+```
+
+This is a backwards incompatible change in the Beta API, therefore the fields will be
+deprecated and removed per our deprecation policy, as described in the [Beta API](#beta-api)
+section below.
+
+### Example
+
+This is an example `PipelineRun` status as provided in the [documentation][example]:
+
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  ...
+spec:
+    ...
+status:
+    completionTime: "2020-05-04T02:19:14Z"
+    conditions:
+      - lastTransitionTime: "2020-05-04T02:19:14Z"
+        message: "Tasks Completed: 4, Skipped: 0"
+        reason: Succeeded
+        status: "True"
+        type: Succeeded
+    startTime: "2020-05-04T02:00:11Z"
+    taskRuns:
+      triggers-release-nightly-build:
+        pipelineTaskName: build
+        status:
+          completionTime: "2020-05-04T02:10:49Z"
+          conditions:
+            - lastTransitionTime: "2020-05-04T02:10:49Z"
+              message: All Steps have completed executing
+              reason: Succeeded
+              status: "True"
+              type: Succeeded
+          podName: triggers-release-nightly-build-pod
+          resourcesResult:
+            - key: commit
+              resourceRef:
+                name: git-source-triggers
+              value: 9ab5a1234166a89db352afa28f499d596ebb48db
+          startTime: "2020-05-04T02:05:07Z"
+          steps:
+            - container: step-build
+              imageID: docker-pullable://golang@sha256:a90f267133
+              name: build
+              terminated:
+                containerID: docker://6b6471f501f59dbb
+                exitCode: 0
+                finishedAt: "2020-05-04T02:10:45Z"
+                reason: Completed
+                startedAt: "2020-05-04T02:06:24Z"
+```
+
+Taking the above example, this will be the new minimal `PipelineRun` status:
+
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  ...
+spec:
+    ...
+status:
+    completionTime: "2020-05-04T02:19:14Z"
+    conditions:
+      - lastTransitionTime: "2020-05-04T02:19:14Z"
+        message: "Tasks Completed: 4, Skipped: 0"
+        reason: Succeeded
+        status: "True"
+        type: Succeeded
+    startTime: "2020-05-04T02:00:11Z"
+    taskRunsStatuses:
+      - taskRunName: triggers-release-nightly-build
+        pipelineTaskName: build
+        conditions:
+          - lastTransitionTime: "2020-05-04T02:10:49Z"
+            message: All Steps have completed executing
+            reason: Succeeded
+            status: "True"
+            type: Succeeded
+```
+
+### Fetching complete statuses of TaskRuns and Runs
+
+#### Cluster
+
+If a user is interested in the complete status of a `TaskRun` or `Run`, they can
+fetch it by its name from the cluster (the name is in the minimal embedded status).
+
+Taking the [example](#example) above, this would be the status of the `TaskRun`:
+
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: TaskRun
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: tekton-pipelines
+    tekton.dev/memberOf: tasks
+    tekton.dev/pipeline: triggers-release-nightly
+    tekton.dev/pipelineRun: triggers-release-nightly
+    tekton.dev/pipelineTask: build
+    tekton.dev/task: build
+  name: triggers-release-nightly-build
+  ownerReferences:
+    - apiVersion: tekton.dev/v1beta1
+      blockOwnerDeletion: true
+      controller: true
+      kind: PipelineRun
+      name: triggers-release-nightly
+spec:
+    ...
+status:
+    completionTime: "2020-05-04T02:10:49Z"
+    conditions:
+      - lastTransitionTime: "2020-05-04T02:10:49Z"
+        message: All Steps have completed executing
+        reason: Succeeded
+        status: "True"
+        type: Succeeded
+    podName: triggers-release-nightly-build-pod
+    resourcesResult:
+      - key: commit
+        resourceRef:
+          name: git-source-triggers
+        value: 9ab5a1234166a89db352afa28f499d596ebb48db
+    startTime: "2020-05-04T02:05:07Z"
+    steps:
+      - container: step-build
+        imageID: docker-pullable://golang@sha256:a90f267133
+        name: build
+        terminated:
+          containerID: docker://6b6471f501f59dbb
+          exitCode: 0
+          finishedAt: "2020-05-04T02:10:45Z"
+          reason: Completed
+          startedAt: "2020-05-04T02:06:24Z"
+```
+
+#### Results API
+
+If the cluster has been cleaned up, a user can rely on the Results API to get the full
+details of the `PipelineRun`'s `TaskRuns` and `Runs`. They can use the Tekton CLI plugin
+for the Tekton Results API:
+
+```shell
+tkn-results records list default/results/- --filter name=="triggers-release-nightly"
+```
+
+For more details on fetching `Results` and `Records`, see the [documentation][cli-plugin].
+
+#### Go Libraries
+
+We will provide functions in the Go libraries to get the `TaskRuns` and `Runs` of a
+given `PipelineRun`. These functions will be useful for the Tekton Dashboard, Tekton
+CLI and other projects using our Go libraries.
+
+### Beta API
+
+Because the `PipelineRun` status is part of the [Pipelines API][api-definition],
+[removing the full embedded statuses](#2-deprecate-and-remove-full-embedded-status)
+is backwards incompatible. 
+
+To support migration as required by our [API compatibility policy][deprecations]
+we will add a behavior flag - `embedded-status` - used to configure whether the
+`PipelineRuns` should contain:
+* the full embedded status of its `TaskRuns` and `Runs`.
+* the minimal embedded status of its `TaskRuns` and `Runs`.
+* both the full and minimal status of its `TaskRuns` and `Runs` - this provides a
+  smoother transition for users and tools.
+
+Following our [policy][behavior-flags] on updating behavior flags:
+1. The `embedded-status` flag will be `full` by default, users can set it to `minimal`
+   or `both`.
+2. After 9 months in v1beta1, the `embedded-status` flag will be changed to `minimal`
+   by default, users can set it to `full` or `both`.
+3. As soon as the next release in v1beta1, the `embedded-status` flag will be removed
+   as well as the full embedded status fields. In reality, this would take a bit longer
+   (about 3 months) after confirming that users and contributors are ready for the flag
+   to be removed.
+
+###### Alternatives
+* [Use Booleans](#beta-api---use-booleans)
+* [Default to Full then Both then Minimal](#beta-api---default-to-full-then-both-then-minimal)
+
+### V1 API
+
+In V1, we will have minimal embedded statuses of `TaskRuns` and `Runs` in `PipelineRuns`.
+
+```go
+type PipelineRunStatusFields struct {
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+	TaskRunsStatuses []PipelineRunTaskRunMinimalStatus `json:"taskRunsStatuses,omitempty"`
+	RunsStatuses []PipelineRunRunMinimalStatus `json:"runsStatuses,omitempty"`
+	PipelineResults []PipelineRunResult `json:"pipelineResults,omitempty"`
+	PipelineSpec *PipelineSpec `json:"pipelineSpec,omitempty"`
+	SkippedTasks []SkippedTask `json:"skippedTasks,omitempty"`
+}
+```
+The full embedded statuses of `TaskRuns` and `Runs` will not be available in `PipelineRuns`.
+Read more about V1 in [TEP-0096: Pipelines V1 API][tep-0096].
+
+### JSON keys
+
+The JSON struct tags defined on Kubernetes CRDs are used to serialize and deserialize
+instances of those CRDs (see [JSON and Go][json-and-go] for more information on how
+struct tags affect serialization and deserialization). We can't reuse the existing JSON
+keys `taskRuns` and `runs` without breaking serialization/deserialization for existing
+`PipelineRuns`. The keys can be reused once we move to a V1 API by writing a conversion
+webhook, but it is easier to simply not reuse the keys.
+
+### Tekton Projects
+
+#### Tekton Pipelines
+
+The PipelineRun controller currently fetches `TaskRuns`, whether from etcd or from a
+cache, on each reconcile loop. The `TaskRuns` and `Runs` fields in `PipelineRunStatus`
+are populated from the `Resolved PipelineRunTaskRuns` ("rprts") in `PipelineRunState`.
+
+The direct uses of `pipelineRun.Status.TaskRuns` and `pipelineRun.Status.Runs` fields in
+the `PipelineRun` controller would need to be updated to use the `TaskRuns` and `Runs`
+from the `Resolved PipelineRunTaskRuns` ("rprts"). For example:
+1. **Cancellation**: Implementation uses the `TaskRun` only from the full embedded status,
+   which is still available in the minimal status. See [code][cancel-code] for details.
+2. **Pipeline Results**: Implementation uses the `TaskRuns` from the `PipelineRun` status.
+   This will be updated to use `TaskRuns` directly. See [code][prresults-code] for details.
+3. **Retries**: Implementation already uses the `TaskRuns` from `Resolved PipelineRunTaskRuns`
+   ("rprts") in `PipelineRunState`. See [code][retries-code] for details.
+
+Making the needed updates is an implementation detail that we will figure out in the
+relevant pull requests.
+
+#### Tekton Results
+
+As described in the [background section](#tekton-results-api), the Results API enables
+users to bundle `TaskRuns` and `Runs` to their parent `PipelineRuns`. It also provides
+long term storage of resources. Users can rely on [Tekton Results][results-api] to map
+`TaskRuns` and `Runs` to provide the mapping that was available in the full embedded
+statuses. 
+
+Note that Results API is still in Alpha, but progress is being made towards Beta - we
+estimate that the Results API will be in Beta by the time we remove the full embedded
+statuses.
+
+#### Tekton Dashboard
+
+[Tekton Dashboard][dashboard] shows the status the `TaskRuns` and `Runs` of a given
+`PipelineRun`, and this should continue to be supported. The Tekton Dashboard currently
+relies on the full embedded statuses, including when the scheduled cleanup of resources
+removed `TaskRuns` and `Runs` from the cluster. The Dashboard will need to be updated
+to use the minimal embedded statuses and rely on Tekton Results for long term storage
+(read more in [related issue][issue-82]).
+
+We expect the load on the Dashboard to reduce and its performance to improve, given
+that the `PipelineRuns` would not be reacting to the updates in `Steps`.
+
+#### Tekton Chains
+
+[Tekton Chain][chains] observes `TaskRuns` and signs them directly, it doesn't depend
+on the full embedded status in `PipelineRun` status. [TEP-0084][tep-0084] proposes that
+Tekton Chains starts to sign `PipelineRuns` - it involves creating a single attestation
+record upon completion of a `PipelineRun` that includes all `TaskRuns`, the `PipelineRun`,
+and the `event-payload` instead of a record for each of them. We will ensure that the
+proposal in TEP-0084 aligns with the changes to `PipelineRuns` proposed in this TEP.
+
+## Design Evaluation
+
+1. **API conventions**: This design complies with the [Kubernetes API conventions][subobjects]
+   by using sub-objects instead of maps for fields, and using string aliases instead of booleans
+   for behavior flags.
+2. **Simplicity**: This design simplifies the `PipelineRun` status by providing the minimum
+   information and updates needed from `TaskRuns` and `Runs`.
+3. **Reusability**: This design encourages reuse of existing components, such as Owner References
+   and Tekton Results, by removing the duplication caused by full embedded statuses.
+4. **Flexibility**: This design improves the extensibility of Tekton Pipelines to support upcoming
+   features that create multiple `TaskRuns`, `Runs` or `PipelineRuns` from a single `PipelineTask`.
+   The behavior flag is also flexible to support more configurations if needed.
+5. **Conformance**: This design impact the conformance surface through changes to the `PipelineRun`
+   interface. The changes are backwards incompatible but will be introduced in a backwards compatible
+   manner first with migration instructions and deprecation warnings.
+
+## Alternatives
+
+### Add Minimal Embedded Status - Collapse Fields
+
+Instead of having separate fields for `TaskRuns` and `Runs`, we could provide the minimal
+embedded fields under one field with references to the types by kind and name. Taking the
+[example](#example) above, this would be the status:
+
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+...
+spec:
+...
+status:
+    completionTime: "2020-05-04T02:19:14Z"
+    conditions:
+      - lastTransitionTime: "2020-05-04T02:19:14Z"
+        message: "Tasks Completed: 4, Skipped: 0"
+        reason: Succeeded
+        status: "True"
+        type: Succeeded
+    startTime: "2020-05-04T02:00:11Z"
+    resources:
+      - apiVersion: v1beta1
+        kind: TaskRun
+        name: triggers-release-nightly-build
+        conditions:
+          - lastTransitionTime: "2020-05-04T02:10:49Z"
+            message: All Steps have completed executing
+            reason: Succeeded
+            status: "True"
+            type: Succeeded
+```
+
+#### Discussion
+
+This approach is extensible to support `PipelineRuns` and other types we may support in
+`PipelineTasks` in addition to `TaskRuns` and `Runs`. However, it's more verbose because
+the type and kind have to be repeated for each `TaskRun` and `Run`. It also makes it more
+difficult for tools and users to parse for specific type of resource when looking at the
+status (compared to separate fields [as proposed](#1-add-minimal-embedded-status).
+
+### Add Minimal Embedded Status - Use Map
+
+Use maps for the new fields, as we do with the existing fields:
+
+```go
+type PipelineRunStatusFields struct {
+	...
+	TaskRuns map[string]*PipelineRunTaskRunStatus `json:"taskRuns,omitempty"`
+	TaskRunsStatuses map[string]*PipelineRunTaskRunMinimalStatus `json:"taskRunsStatuses,omitempty"`
+	Runs map[string]*PipelineRunRunStatus `json:"runs,omitempty"`
+	RunsStatuses map[string]*PipelineRunRunMinimalStatus `json:"runsStatuses,omitempty"`
+	...
+}
+```
+
+Taking the [example above](#example), this would be the `PipelineRun` status:
+
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  ...
+spec:
+    ...
+status:
+    completionTime: "2020-05-04T02:19:14Z"
+    conditions:
+      - lastTransitionTime: "2020-05-04T02:19:14Z"
+        message: "Tasks Completed: 4, Skipped: 0"
+        reason: Succeeded
+        status: "True"
+        type: Succeeded
+    startTime: "2020-05-04T02:00:11Z"
+    taskRunStatus:
+      triggers-release-nightly-build:
+        conditions:
+          - lastTransitionTime: "2020-05-04T02:10:49Z"
+            message: All Steps have completed executing
+            reason: Succeeded
+            status: "True"
+            type: Succeeded
+```
+
+#### Discussion
+
+While this approach is consistent with existing code, it does not comply with the
+[Kubernetes API conventions][subobjects] that recommend against maps.
+The [main problem][why-subobjects] with maps is:
+> The crux of maps is that it isn't clear to the user what "left-hand side strings"
+> are "magic keywords" in the config system/API vs. which are user data.
+
+### Beta API - Use Booleans
+
+We could add a behavior flag - `enable-full-embedded-status` - used to configure
+whether `PipelineRuns` should contain the embedded status or minimal status of
+its `TaskRuns` and `Runs`.
+
+Following our [policy][behavior-flags] on updating behavior flags:
+* The `enable-full-embedded-status` flag will be *true* by default.
+* After 9 months in v1beta1, the `enable-full-embedded-status` flag will be flipped
+  to *false* by default.
+* As soon as the next release in v1beta1, the `enable-full-embedded-status` flag will
+  be removed as well as the full embedded status fields.
+
+#### Discussion
+
+While the behavior flag taking booleans solves for the options we need, the 
+[Kubernetes API conventions][primitives] warn "think twice about boolean fields"
+because "many ideas start as boolean but eventually trend towards a small set of
+mutually exclusive options". In the small chance that users want to have both full
+and minimal embedded statuses as they make transitions, using a boolean for this
+field would be limiting. Therefore, we prefer the alternative to using string aliases.
+
+### Beta API - Default to Full then Both then Minimal
+
+To provide a smoother migration as required by our [API compatibility policy][deprecations]
+we will add a behavior flag - `embedded-status` - used to configure whether the
+`PipelineRuns` should contain:
+* the full embedded status of its `TaskRuns` and `Runs`
+* the minimal embedded status of its `TaskRuns`and `Runs`
+* both the full and minimal status of its `TaskRuns` and `Runs`
+
+Following our [policy][behavior-flags] on updating behavior flags:
+1. The `embedded-status` flag will be `full` by default, users can set it to `minimal`
+   or `both`.
+2. After 2 months in v1beta1, the `embedded-status` flag will be changed to `both`
+   by default, users can set it to `full` or `minimal`.
+3. After 7 more months in v1beta1, the `embedded-status` flag will be changed to `minimal`
+   by default, users can set it to `full` or `both`.
+4. As soon as the next release in v1beta1, `embedded-status` flag will be removed as
+   well as the full embedded status fields. In reality, this would take a bit longer
+   after confirming that users and contributors are ready for the flag to be removed.
+
+#### Discussion
+
+While this approach gives users more control by allowing them to receive both the full and
+minimal statuses, it causes more duplication and worsens the [problems](#motivation)
+described above. This remains an option we can support later if we receive feedback that
+users need it for smoother migration, and the [proposal](#beta-api) is set up to easily
+support this expansion.
 
 ## References
 
@@ -186,16 +707,35 @@ Read more in [TEP-0021][tep-0021].
 * TEPs:
   * [TEP-0021: Results API][tep-0021]
   * [TEP-0056: Pipelines in Pipelines][tep-0056]
+  * [TEP-0084: End-to-End Provenance Collection][tep-0084]
   * [TEP-0090: Matrix][tep-0090]
+  * [TEP-0096: Pipelines V1 API][tep-0096]
 * [Tekton Results][results-api]
 
 [tep-0056]: https://github.com/tektoncd/community/blob/main/teps/0056-pipelines-in-pipelines.md
 [tep-0090]: https://github.com/tektoncd/community/blob/main/teps/0090-matrix.md
 [tep-0021]: https://github.com/tektoncd/community/blob/main/teps/0021-results-api.md
+[tep-0084]: https://github.com/tektoncd/community/blob/main/teps/0084-endtoend-provenance-collection.md
+[tep-0096]: https://github.com/tektoncd/community/blob/main/teps/0096-pipelines-v1-api.md
 [issue-3140]: https://github.com/tektoncd/pipeline/issues/3140
 [issue-3792]: https://github.com/tektoncd/pipeline/issues/3792
+[issue-82]: https://github.com/tektoncd/results/issues/82
 [api-wg]: https://docs.google.com/document/d/17PodAxG8hV351fBhSu7Y_OIPhGTVgj6OJ2lPphYYRpU/edit#heading=h.esbaqjpyouim
 [pipelinerunstatus]: https://github.com/tektoncd/pipeline/blob/411d033c5e4bf3409f01b175531cbc1a0a75fadb/pkg/apis/pipeline/v1beta1/pipelinerun_types.go#L290-L296
 [pipelinerunstatusfields]: https://github.com/tektoncd/pipeline/blob/411d033c5e4bf3409f01b175531cbc1a0a75fadb/pkg/apis/pipeline/v1beta1/pipelinerun_types.go#L393-L423
 [results-api]: https://github.com/tektoncd/results
 [qn-1]: https://github.com/tektoncd/community/pull/606#discussion_r792860152
+[subobjects]: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#lists-of-named-subobjects-preferred-over-maps
+[primitives]: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#primitive-types
+[behavior-flags]: https://github.com/tektoncd/community/blob/main/teps/0033-tekton-feature-gates.md#promoting-behavior-flags
+[api-definition]: https://github.com/tektoncd/pipeline/blob/main/api_compatibility_policy.md#alpha-beta-and-ga
+[json-and-go]: https://go.dev/blog/json
+[why-subobjects]: https://github.com/kubernetes/kubernetes/issues/2004#issuecomment-60641437
+[example]: https://github.com/tektoncd/pipeline/blob/411d033c5e4bf3409f01b175531cbc1a0a75fadb/docs/pipelineruns.md#monitoring-execution-status
+[chains]: https://github.com/tektoncd/chains
+[dashboard]: https://github.com/tektoncd/dashboard
+[deprecations]: https://github.com/tektoncd/pipeline/blob/main/api_compatibility_policy.md#backwards-incompatible-changes
+[cli-plugin]: https://github.com/tektoncd/results/blob/main/tools/tkn-results/docs/tkn-results.md
+[cancel-code]: https://github.com/tektoncd/pipeline/blob/8197a629339ee5dea18bde26422ae16ad222e8e5/pkg/reconciler/pipelinerun/cancel.go#L99-L123
+[prresults-code]: https://github.com/tektoncd/pipeline/blob/f97df42b531b620631791aef12807014368fafcd/pkg/reconciler/pipelinerun/pipelinerun.go#L574-L573
+[retries-code]: https://github.com/tektoncd/pipeline/blob/6cb0f4ccfce095495ca2f0aa20e5db8a791a1afe/pkg/reconciler/pipelinerun/resources/pipelinerunstate.go#L238
