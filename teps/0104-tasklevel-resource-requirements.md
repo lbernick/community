@@ -2,7 +2,7 @@
 status: implementable
 title: Task-level Resource Requirements
 creation-date: '2022-04-08'
-last-updated: '2022-05-11'
+last-updated: '2022-05-31'
 authors:
 - '@lbernick'
 - '@vdemeester'
@@ -89,6 +89,7 @@ TaskRuns are rejected if there is no configuration that meets these constraints.
   - We could still choose in the future to provide configuration on Pipeline for Task-level resource requirements (e.g. via params).
 - Parameterizing resource requirements, as requested in [#4080][4080].
 This would be a valuable addition to Tekton but is out of scope for this proposal.
+- Compute resources can be configured for the same type of resources, either task-level or step-level
 
 ## Existing Strategies for Controlling Resource Consumption
 
@@ -202,6 +203,9 @@ If there is no container configuration that satisfies the LimitRange, the TaskRu
 
 We should consider deprecating `Task.Step.Resources`, `Task.StepTemplate.Resources`, and `TaskRun.StepOverrides`.
 Specifying resource requirements for individual Steps is confusing and likely too granular for many CI/CD workflows.
+
+This work will support users either specify via task-level or step-level for any compute resources. A further improvement can be implemented
+to allow users to configure one type of resource, task-level or step-level.
 
 ## Examples
 
