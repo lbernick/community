@@ -102,13 +102,77 @@ the [Aug 31, 2021 Workflows WG Meeting Notes](https://docs.google.com/document/d
 
 ## Proposal
 
-<!--
-This is where we get down to the specifics of what the proposal actually is.
-This should have enough detail that reviewers can understand exactly what
-you're proposing, but should not include things like API designs or
-implementation.  The "Design Details" section below is for the real
-nitty-gritty.
--->
+Task V1:
+
+```yaml
+kind: Task
+spec:
+  input_artifacts:
+  - name: source
+    path: /app
+  secrets:
+  - name: artifact-repository-creds
+    keys:
+    - name: service-account-key
+      description: "service account key used for pushing docker image"
+  volumes: # internal workspace
+  - name: docker-socket
+    path: /var/run/docker.sock
+  steps:
+  - name: docker-build
+  - name: docker-push
+  sidecars:
+  - name: builder-sidecar
+```
+
+- task v1 doesn't have volumes
+
+artifacts:
+- default artifact storage will be a PVC or just abstracted away, but cluster operator can configure other default artifact storage options
+  - if default artifact storage is in an artifact repository, will need to zip it. could do this anyway
+- solves workspace dependencies problem
+- would probably help with Pipeline in a pod
+- do we want a different name for input vs output artifacts? (e.g. how we do with results and params)
+- would probably help us make better guarantees re: storage
+
+secrets:
+- mount as readonly (don't even need to provide another mount option until we get user requests for it)
+- default secret binding: in a PipelineRun, look for a k8s secret with the name of a pipeline secret.
+In a TaskRun, look for a k8s secret with the name of the task secret
+- allows us to do workspace paths
+
+config:
+- pretty much same as secret but with a configmap
+- unclear why people might use this instead of env vars?
+
+internal workspaces:
+- cannot be bound in taskruns or pipelineruns
+- tekton supplies an emptydir volume
+
+(maybe): cache
+- bound by persistent volume
+- read only?
+
+** how to handle dynamic workspaces? **
+- probably support this only for secrets and config
+  - input secrets and output secrets? that's a bit awkward
+
+what about CSI workspaces and projectedvolumes workspaces?
+- CSI workspaces can be used for basically anything but use case is hashicorp vault
+- each type of workspace-thing can have its own supported set of bindings
+
+migration from v1beta1 -> v1:
+- could make this additive: v1 has workspaces too, and we encourage users to move to the new types if they want the defaulting behavior
+  - conversion from v1beta1 -> v1: Just copy over the workspaces field
+  - conversion from v1 -> v1beta1: convert the new fields back to workspaces
+- could add these fields to v1beta1, and then v1 doesn't have workspaces
+- what if we don't want to add these fields to v1beta1 and v1 doesn't have workspaces?
+  - while v1beta1 is storage version, could just use serialization/deserialization trick
+    - might be a little tricky because workspaces are declared in multiple places
+  - when v1 is storage version, ????
+    - how to turn a generic workspace into a "typed" one?
+  - 2 reconcilers? or have reconciler somehow handle multiple types
+
 
 ### Notes/Caveats (optional)
 
