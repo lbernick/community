@@ -136,13 +136,137 @@ be handled, or user scenarios that will be affected and must be accomodated.
 
 ## Proposal
 
-<!--
-This is where we get down to the specifics of what the proposal actually is.
-This should have enough detail that reviewers can understand exactly what
-you're proposing, but should not include things like API designs or
-implementation.  The "Design Details" section below is for the real
-nitty-gritty.
--->
+Create a new Repository CRD:
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1  # TODO
+kind: Repository
+metadata:
+  name: pipelines
+  namespace: ops
+spec:
+  url: https://github.com/tektoncd/pipeline
+  scmType: github
+```
+
+A user can also choose to specify a repo name and organization instead of a URL:
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1  # TODO
+kind: Repository
+metadata:
+  name: pipelines
+  namespace: ops
+spec:
+  org: tektoncd
+  repo: pipeline
+  scmType: github
+```
+
+### Repo connections
+
+Repo connections aren't in scope for this proposal. There are many different ways of "connecting" to a given repo, including:
+- Cloning it once as part of a CI/CD pipeline
+- Regularly polling it for updates
+- Setting up a webhook on it to subscribe to events
+- Installing a GitHub App on it
+- "Connecting" to the organization the repo is associated with, and adding the repo to the organization "connection"
+
+This logic is better handled by the project using the Repository CRD.
+This also means that configuration for events, files in the repo, or git revisions shouldn't be included in the repo CRD.
+
+### Authentication
+
+It's very likely that cluster operators would be interested in providing credentials for a repo only once, and then referring to that
+repo many times in different Tekton resources. This makes authentication configuration a good candidate for including in a repo CRD.
+However, there are some challenges:
+
+1. Different SCMs have different ways of handling authentication, and authentication may differ based on how the repo is "connected".
+For example:
+- The repo could be cloned or polled using SSH keys.
+- A user could set up a webhook using a personal access token for their own account or a robot account.
+- A user could be directed through an OAuth flow to install a GitHub App on the repo.
+- A user could connect the repo to an existing GitHub App using the app's private key.
+
+2. Tekton functionality that uses repo connections will have to grapple with whether users that don't have access to these credentials
+should be able to create Tekton resources referencing these credentials.
+
+For example: a cluster operator could configure SSH keys (stored in a secret) for a repo that a developer doesn't have access to.
+If the developer has access to the Kubernetes cluster, and creating a repo CRD with credentials means the repo could be used in PipelineRuns,
+the developer could theoretically create a PipelineRun that uploads the contents of the repo somewhere they do have access to.
+
+TODO: This might not actually be a problem-- there might be plenty of these situations already existing with Tekton that just aren't a problem
+in practice. Need to think through scenarios.
+
+3. We should ideally create a syntax for referring to secrets that doesn't rely on Kubernetes-isms, in keeping with Tekton's
+design principles on [conformance](https://github.com/tektoncd/community/blob/master/design-principles.md#conformance).
+This makes it easier to create non-Kubernetes-based Tekton implementations.
+
+One option would be to add all the common SCM authentication methods to the repo CRD, as references to secrets.
+This is similar to how the Pipelines [Git resolver](https://github.com/tektoncd/pipeline/blob/main/docs/git-resolver.md)
+is configured. For now, authentication will be left out of scope for an initial version of this proposal
+until we have some examples of projects using the Repository CRD.
+
+### Organizations
+
+Many SCMs have the concept of an organization to manage multiple repos for a team.
+The following SCMs call this concept an "organization":
+- GitHub and GitHub Enterprise
+- GitLab
+- Gerrit
+- Gitea
+
+The following SCMs have modified concepts of organizations:
+- Bitbucket, which has "Teams"
+- Azure Repos, Google Cloud Source Repositories, and AWS CodeCommit, which all manage organizations through their broader platforms rather than
+an "organization" concept specific to their SCM products.
+
+The following SCMs don't have concepts of "organizations":
+- SourceHut
+- SourceForge
+
+In the [JetBrains State of the Developer Ecosystem 2019](https://www.jetbrains.com/lp/devecosystem-2019/team-tools/),
+the most commonly used SCMs by far were GitHub, GitLab, and Bitbucket. 
+In addition, Pipelines has already added support for repository name + organization name syntax (as an alternative to a URL) in its
+[Git resolver](https://github.com/tektoncd/pipeline/blob/main/docs/git-resolver.md).
+Therefore, the term "organization" is general enough for most use cases.
+
+In the future, we could explore adding an "Organization" CRD or similar, to help in configuring connections to SCM organizations
+instead of individual repos.
+
+### Terminology
+
+- "SCM" is preferred here over "VCS", because even though the terms are often used interchangeably, the intention here is to refer to the
+source control manager hosting the repo rather than the version control system used to make changes to the repo.
+- "Repository" is preferred here over "GitRepository", as not all source code repositories use Git as their version control system.
+One potential downside is that "Repository" could be unintentionally interpreted to include artifact repositories.
+(Expanding scope to artifact repositories is a potential avenue for future exploration.)
+
+## Example Usage: Workflows
+
+In this example, the CI pipeline is stored in a different repo than the repo to run CI on.
+
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: Workflow
+spec:
+  repos:
+  - name: pipelines
+  - name: plumbing
+  events:
+  - repo: pipelines
+    type: pull_request
+  pipelineRun:
+    pipelineRef:
+      resolver: git
+      params:
+      - name: url
+        value: $(repos.plumbing.url)
+      - name: revision
+        value: 12345
+      - name: pathInRepo
+        value: tekton/pipelines/ci-pipeline.yaml
+```
 
 ### Notes/Caveats (optional)
 
@@ -167,29 +291,6 @@ How will UX be reviewed and by whom?
 Consider including folks that also work outside the WGs or subproject.
 -->
 
-### User Experience (optional)
-
-<!--
-Consideration about the user experience. Depending on the area of change,
-users may be task and pipeline editors, they may trigger task and pipeline
-runs or they may be responsible for monitoring the execution of runs,
-via CLI, dashboard or a monitoring system.
-
-Consider including folks that also work on CLI and dashboard.
--->
-
-### Performance (optional)
-
-<!--
-Consideration about performance.
-What impact does this change have on the start-up time and execution time
-of task and pipeline runs? What impact does it have on the resource footprint
-of Tekton controllers as well as task and pipeline runs?
-
-Consider which use cases are impacted by this change and what are their
-performance requirements.
--->
-
 ## Design Details
 
 <!--
@@ -204,22 +305,6 @@ of the file, but general guidance is to include at least TEP number in the
 file name, for example, "/teps/images/NNNN-workflow.jpg".
 -->
 
-## Test Plan
-
-<!--
-**Note:** *Not required until targeted at a release.*
-
-Consider the following in developing a test plan for this enhancement:
-- Will there be e2e and integration tests, in addition to unit tests?
-- How will it be tested in isolation vs with other components?
-
-No need to outline all of the test cases, just the general strategy.  Anything
-that would count as tricky in the implementation and anything particularly
-challenging to test should be called out.
-
-All code is expected to have adequate tests (eventually with coverage
-expectations).
--->
 
 ## Design Evaluation
 <!--
@@ -229,9 +314,7 @@ and conformance of Tekton, as described in [design principles](https://github.co
 
 ## Drawbacks
 
-<!--
-Why should this TEP _not_ be implemented?
--->
+The Repository CRD doesn't do very much on its own. It's not yet clear how much value it will add compared to an inline repo definition.
 
 ## Alternatives
 
@@ -242,21 +325,49 @@ Why should this TEP _not_ be implemented?
   might therefore be a good candidate to have its own schema that
   repository configuration can reference.
 
-## Infrastructure Needed (optional)
+### Couple the Repo CRD to repo connections
 
-<!--
-Use this section if you need things from the project/SIG.  Examples include a
-new subproject, repos requested, github details.  Listing these here allows a
-SIG to get the process for these resources started right away.
--->
+One example of this pattern is FluxCD's [GitRepository](https://fluxcd.io/flux/components/source/gitrepositories/),
+which polls a Git repository for changes:
 
-## Upgrade & Migration Strategy (optional)
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: GitRepository
+spec:
+  interval: 5m0s  # Frequency to poll repo for updates
+  url: https://github.com/tektoncd/pipeline
+  ref:
+    branch: master  # The branch to monitor for changes
+  secretRef:
+    name: git-ssh-creds
+```
 
-<!--
-Use this section to detail wether this feature needs an upgrade or
-migration strategy. This is especially useful when we modify a
-behavior or add a feature that may replace and deprecate a current one.
--->
+Another example is Knative's [GitHub EventSource](https://github.com/knative/docs/tree/main/code-samples/eventing/github-source),
+which sets up a webhook on a GitHub repo and sends events to a connected sink:
+
+```yaml
+apiVersion: sources.knative.dev/v1alpha1
+kind: GitHubSource
+metadata:
+  name: githubsourcesample
+spec:
+  eventTypes:
+    - pull_request
+  ownerAndRepository: tektoncd/pipeline
+  accessToken:
+    secretKeyRef:
+      name: githubsecret
+      key: accessToken
+  secretToken:
+    secretKeyRef:
+      name: githubsecret
+      key: secretToken
+  sink:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: github-message-dumper
+```
 
 ## Implementation Pull request(s)
 
@@ -265,12 +376,4 @@ Once the TEP is ready to be marked as implemented, list down all the Github
 Pull-request(s) merged.
 Note: This section is exclusively for merged pull requests, for this TEP.
 It will be a quick reference for those looking for implementation of this TEP.
--->
-
-## References (optional)
-
-<!--
-Use this section to add links to GitHub issues, other TEPs, design docs in Tekton
-shared drive, examples, etc. This is useful to refer back to any other related links
-to get more details.
 -->
