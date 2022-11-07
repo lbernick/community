@@ -174,13 +174,257 @@ be handled, or user scenarios that will be affected and must be accomodated.
 
 ## Proposal
 
-<!--
-This is where we get down to the specifics of what the proposal actually is.
-This should have enough detail that reviewers can understand exactly what
-you're proposing, but should not include things like API designs or
-implementation.  The "Design Details" section below is for the real
-nitty-gritty.
--->
+### API
+
+The Workflows API provides an extensibility mechanism that allows platform builders
+to write controllers responsible for connecting to Git repositories, generating events
+from them, and posting events back to them.
+
+#### Git Repository configuration
+
+Create a new CRD to configure connections to Git repositories.
+The only required configuration option is a repo URL.
+The name of the connector is specified as a label on the GitRepository, to allow the controller
+to filter GitRepositories it is responsible for.
+The GitRepository spec allows arbitrary extra fields to be passed to the connector,
+similarly to how CustomRuns can define their own extra fields to pass to CustomRun controllers.
+
+TODO: pass auth configuration as a top level field vs customFields?
+TODO: detail on status
+
+Example:
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: GitRepository
+metadata:
+  labels:
+    workflows.tekton.dev/connector: git-poll
+spec:
+  url: https://github.com/tektoncd/pipeline
+  customFields:
+    pollingInterval: 5m0s
+status:
+  conditions:
+  - type: Succeeded
+    status: "True"
+    reason: RepoCloned
+```
+
+- might use repo for auth tokens during run
+- use repo to establish provenance
+- other ways to specify a repo? e.g. by reference to cloud provider?
+
+### Something closer to GCB repos
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: SCMConnection
+metadata:
+  name: tekton-org-connection
+  namespace: my-namespace
+  labels:
+    workflows.tekton.dev/connector: github-app
+spec:
+  repos:
+  - url: https://github.com/tektoncd/pipeline
+  - url: https://github.com/tektoncd/plumbing
+  customFields:
+    appID: 12345
+    appPrivateKey:
+      name: github-app-private-key
+      key: secret-token
+    appWebhookSecret:
+      name: github-app-private-key
+      key: secret-token
+status:
+  conditions:
+  - type: Succeeded  # TODO: is this standard or anything?
+    status: Unknown
+    reason: ConnectionInProgress
+    message: "Waiting for user to accept installation of the GitHub Application on the organization"
+  customFields:
+```
+
+### Example: Github repo used in both a CI Workflow and a CD Workflow
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: GitRepository
+metadata:
+  name: pipelines-repo
+  namespace: my-namespace
+  labels:
+    workflows.tekton.dev/connector: github-app
+spec:
+  url: https://github.com/tektoncd/pipeline
+  customFields:
+    appID: 12345
+    webhookSecret:
+      name: github-app-webhook-secret
+      key: secret-token
+    appPrivateKey:
+      name: github-app-private-key
+      key: secret-token
+status:
+  conditions:
+  - type: Succeeded  # TODO: is this standard or anything?
+    status: Unknown
+    reason: ConnectionInProgress
+    message: "Waiting for user to accept installation of the GitHub Application on the repo"
+  customFields:
+    repoStatus: private
+```
+
+
+// FIXME!!!
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: Events
+metadata:
+  name: webhook-example
+  namespace: my-namespace
+spec:
+  source:
+    # Can also be cron, e.g.
+    # cron: "* * * * *"
+    repoRef:
+      name: pipelines-repo
+  types:  # TODO: take a look at event sources and see if there's anything else needed to describe an event type
+  - pull_request
+  - issue_comment
+  customFields:
+    webhookSecret:
+      name: github-webhook-secret
+      key: secret-token
+  sink: 
+    # Can use knative eventing syntax here
+    # TODO: how to hide this implementation detail
+    url: http://el-github-listener.tekton-workflows.svc.cluster.local:8080
+status:
+  conditions:
+  - type: Ready
+    status: "True"
+    reason: WebhookCreated
+  customFields:
+    foo: bar
+```
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: Events
+metadata:
+  name: github-app-example
+  namespace: my-namespace
+spec:
+  source:
+    repoRef:
+      name: pipelines-repo
+  types:
+  - check_suite
+  sink: 
+    # Can use knative eventing syntax here
+    # TODO: how to hide this implementation detail
+    url: http://el-github-listener.tekton-workflows.svc.cluster.local:8080
+status:
+  conditions:
+  - type: Ready
+    status: "True"
+    reason: WebhookCreated
+    message: "Github app webhook updated?" # TODO this doesn't work
+  customFields:
+    foo: bar
+```
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: Workflow
+metadata:
+  name: pipelines-ci
+  namespace: ci
+spec:
+  repos:
+  - name: pipelines # Will look for a GitRepository named "pipelines-repo" in the same namespace and fail if it does not exist
+    ref: pipelines-repo
+  - name: plumbing
+    ref: plumbing-repo
+  triggers:
+  - name: on-pr
+    events:
+      source:
+        repo: pipelines
+      types:
+      - check_suite
+    filters:
+    - custom:
+        cel: "body.action in ['requested']"
+  pipelineRef:
+    resolver: git
+    params:
+    - name: url
+      value: $(repos.plumbing.url)
+status:
+  TODO
+```
+
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: WorkflowRun
+spec:
+  # ???
+status:
+  pipelineRun: my-ci-pipelinerun-12345
+  resultRefs: # TODO
+  attestations: # TODO
+```
+
+TODO: workflow run?
+TODO: the commit is associated with the event, not the repo. How best to get it?
+
+
+
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: GitRepository
+metadata:
+  name: pipelines-repo
+  namespace: my-namespace
+  labels:
+    workflows.tekton.dev/connector: github-app
+spec:
+  url: https://github.com/tektoncd/pipeline
+  events:
+  - push
+  
+  customFields:
+    appID: 12345
+    webhookSecret:
+      name: github-app-webhook-secret
+      key: secret-token
+    appPrivateKey:
+      name: github-app-private-key
+      key: secret-token
+status:
+  conditions:
+  - type: Succeeded  # TODO: is this standard or anything?
+    status: Unknown
+    reason: ConnectionInProgress
+    message: "Waiting for user to accept installation of the GitHub Application on the repo"
+  customFields:
+    repoStatus: private
+```
+
+### Param interpolation
+- repos.repo-name.???
+- secrets.secret-name.???
+- params.param-name.???
+
+Options for Github Connections:
+- Connection installs an existing GitHub app on your organization (you need to authorize it)
+- You use an existing installation ID
+
 
 ### Notes/Caveats (optional)
 
