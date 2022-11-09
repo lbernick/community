@@ -172,15 +172,217 @@ performance characteristics that must be met, specific edge cases that must
 be handled, or user scenarios that will be affected and must be accomodated.
 -->
 
-## Proposal
+## Milestone 1 Proposal: Generating events from connected repositories
 
-<!--
-This is where we get down to the specifics of what the proposal actually is.
-This should have enough detail that reviewers can understand exactly what
-you're proposing, but should not include things like API designs or
-implementation.  The "Design Details" section below is for the real
-nitty-gritty.
--->
+
+### CI Workflow with repo connections + eventing + triggers
+
+### Workflows API
+
+The initial experimental version of the workflows API will focus on connecting repo-generated events to the existing Tekton Triggers API.
+After this experimental version is implemented, we can design syntactic sugar that reduces verbosity of the full setup. 
+
+Example:
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: Workflow
+metadata:
+  name: pipelines-ci
+  namespace: tekton-ci
+spec:
+  repos:
+  - name: pipelines
+    ref:  # In the future, we may also support `spec`
+      name: pipelines
+      namespace: core
+  - name: plumbing
+    ref:
+      name: plumbing
+      namespace: ops
+  triggers:
+  - name: on-pr
+    event:
+      source:
+        repo: pipelines  # Under the hood, this will use the github interceptor
+      types:
+      - check_suite
+    filters:
+      cel: "body.action in ['requested']"
+  - name: on-pr-comment
+    event:
+      source:
+        repo: pipelines
+      types:
+      - pull_request_review_comment
+      - issue_comment
+    filters:
+      cel: "body.comment.body startswith '/retest'"  # fixme
+
+```
+
+
+
+
+### Repository connections
+
+In order to allow platform builders to support connections to additional SCMs, or connections to existing SCMs in multiple ways, repository connections will be handled by
+"connector" controllers that support authentication and event generation for a given SCM. <!-- FIXME: SCM vs VCS? -->
+Tekton Workflows will ship with a "Github" connector and a polling connector; see [built-in connectors](#built-in-connectors) for more info.
+
+VCS connections are done as an initial setup step, where a cluster operator provides credentials and the connector is responsible for creating a long-lived connection and
+keeping it up-to-date over time. (For example, if a platform connects to a GitHub repo using deploy keys, this connection must be updated if the repo admin rotates their deploy keys.)
+Repo connections can then be referenced in multiple Workflows. For example, this would allow a user to write a CI Workflow and a CD Workflow for the same repo, without specifying
+repo credentials in each Workflow.
+
+To create a new connection to a repo, the cluster operator creates an instance of a new CRD, a `GitRepository`. Each connector controller filters for the `GitRepository`s of
+interest, and updates their status. <!--TODO: How to prevent multiple controllers from updating the status of one GitRepository?-->
+Filtering is done based on the label "workflows.tekton.dev/connector".
+Like `CustomRun`s, the `GitRepository` CRD contains spec fields where users may specify arbitrary configuration for repo connections, and status fields where controllers can provide
+arbitrary information.
+
+
+Examples of setup steps:
+
+
+
+
+### Example: Webhook 
+
+### Example: New GitHub App
+
+### Example: Existing GitHub App
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: GitRepository
+metadata:
+  name: webapp
+  namespace: ops
+  labels:
+    workflows.tekton.dev/connector: github-app
+spec:
+  url: https://github.com/small-startup/next-big-idea-app
+  vcsType: github
+  customFields:
+    appID: 12345
+    webhookSecretRef:
+      name: github-webhook-secret
+      key: secret-token
+status:
+  conditions:
+  - type: Ready
+    status: "True"
+    reason: InstallationComplete
+  customFields:
+    installationID: 67890
+```
+
+In this example, the "github-app" connector is responsible for installing app "12345" on the next-big-idea-app repo. 
+
+
+### Example: Deploy Keys
+
+### Example: Polling
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: GitRepository
+metadata:
+  name: webapp
+  namespace: ops
+  labels:
+    workflows.tekton.dev/connector: polling
+spec:
+  url: https://github.com/small-startup/next-big-idea-app
+  customFields:
+    pollingInterval: 5m
+
+status:
+  conditions:
+  - type: Ready
+    status: "True"
+    reason: InstallationComplete
+  customFields:
+    installationID: 67890
+```
+
+### Org-level connections
+
+In addition to repo connections, VCS connections may happen at the org level. For example, an organization may maintain multiple repos, and want to configure credentials
+only once for the organization rather than once for each repo.
+
+To create an organization-level connection, cluster operators create an instance of a `GitOrganization` CRD. <!-- TODO: Naming. -->
+Connectors should indicate whether they support `GitRepository`s, `GitOrganization`s, or both.
+This work is scoped for a follow-up milestone of the project.
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: SCMConnection
+metadata:
+  name: tekton-org
+  namespace: ops
+  labels:
+    workflows.tekton.dev/connector: github-app
+spec:
+  orgName: tektoncd
+  vcsType: github
+  # robotAccount: tekton-robot
+  repos:
+  - pipeline
+  - plumbing
+  - chains
+  customFields:
+    personalAccessToken:
+      secretName: github-pat
+      secretKey: token
+status:
+  conditions:
+  - type: Ready
+    status: Unknown
+    message: "Waiting for user to install app on organization"
+  customFields:
+    foo: bar
+```
+
+### Built-in connectors
+
+### Referencing Repos in Workflows
+
+Users should be able to declare one or more repos in their Workflow. Initially, Workflows will have references to `GitRepositories` which must already exist.
+Later, we can add support for inline repository configuration, where the Workflow will create a `GitRepository` if it does not yet exist.
+Workflows should be able to reference `GitRepositories` in other namespaces, to make it easier for cluster operators to set up the `GitRepository` while app developers reference it in their workflows.
+Cross-namespace references are also beneficial for use cases where you might want to have (for example) a CI namespace and a CD namespace.
+
+### Generating events from repositories
+
+Event configuration should be separate from repo connection configuration, because the same repository can be used in multiple Workflows that trigger based on different events.
+In addition to `GitRepositories`, repo connectors are expected to respond to `RepositoryEvents` CRDs. An example `RepositoryEvent` is as follows:
+
+```yaml
+apiVersion: workflows.tekton.dev/v1alpha1
+kind: RepositoryEvent
+metadata:
+  name: pull_request
+spec:
+  types:
+  - check_suite
+
+```
+
+TODO: What happens if RepositoryEvents have different sinks?
+TODO: What happens if sink is not a public URL?
+
+When a user specifies Triggers in their Workflow, the controller will create an instance of an Event CRD
+
+## Milestones
+
+1. Event triggering
+- User can create a connection to a repository and send events to an EventListener from this repository.
+- An EventListener can be triggered by a CronJob. 
+2. Notifications
+
+3. Reduced verbosity for filters and interceptors
+4. concurrency controls
 
 ### Notes/Caveats (optional)
 
