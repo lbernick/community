@@ -619,6 +619,21 @@ Repos can be used in parameter substitutions. Supported substitutions are:
 
 #### Events and Filters
 
+The events most commonly used to trigger a CI/CD pipeline are:
+- A pull/merge request is opened or updated
+  - Users should be able to configure whose pull requests can trigger CI
+- A user comments on a pull/merge request (e.g. "/retest", "/ok-to-test")
+  - Users should be able to configure whose comments will trigger a PipelineRun, and what strings do so
+  - Assume that the same users whose pull requests can trigger CI are the ones able to make these comments
+  - How to configure /retest only running failed tests?
+- A commit is pushed to a certain branch or tag of a repo
+
+- CEL filtering
+
+- file filters
+  - Can both trigger events and be referenced in pipelines (e.g. you might want to only lint and not run unit tests if only .md files are changed)
+  - Change may be relative to previous commit or to target branch (?)
+
 TODO
 
 #### PipelineRun
