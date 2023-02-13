@@ -498,6 +498,45 @@ This solution is not proposed because it is too opinionated to align with our de
 There are multiple ways of building images (e.g. kaniko, docker, buildkit) and no reason that Tekton should prefer one over the others.
 Pipeline-level sidecars can be used in much more flexible ways.
 
+### Docker daemon Custom Task
+
+We could add Catalog support for Custom Tasks, and add a Docker daemon custom task, for example:
+
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+spec:
+  workspaces:
+  - name: source
+  - name: docker-tls-certs
+  tasks:
+  - name: git-clone
+    ...
+  - name: startup-docker-daemon
+    taskRef:
+      apiVersion: tekton.dev/v1beta1
+      kind: docker
+    workspaces:
+    - name: docker-tls-certs
+  - name: docker-build
+    params:
+    - name: docker-host
+      value: $(tasks.startup-docker-daemon.results.host)
+    ...
+    # Same spec as in the above example
+  - name: pytest
+    ...
+    # Same spec as in the above example
+  - name: docker-push
+    ...
+    # Same spec as in the above example
+```
+
+Pros:
+
+Cons:
+
+
 ## Implementation Plan
 
 <!--
